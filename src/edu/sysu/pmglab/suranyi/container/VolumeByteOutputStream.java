@@ -78,21 +78,6 @@ public class VolumeByteOutputStream extends OutputStream {
     }
 
     /**
-     * 内部扩容方法
-     * @param extendSize 比对大小
-     */
-    private void expansion(int extendSize) {
-        int newSize;
-        newSize = (int) ((seek + extendSize) * 1.5);
-
-        byte[] newCache = new byte[newSize];
-        if (this.seek > 0) {
-            System.arraycopy(this.cache, 0, newCache, 0, this.seek);
-        }
-        this.cache = newCache;
-    }
-
-    /**
      * 获取缓冲区段数据
      * @return 获取本定容容器缓冲区数据
      */
