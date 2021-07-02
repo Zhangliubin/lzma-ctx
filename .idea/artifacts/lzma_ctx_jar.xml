@@ -1,0 +1,8 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="lzma-ctx:jar">
+    <output-path>$PROJECT_DIR$/</output-path>
+    <root id="archive" name="lzma-ctx.jar">
+      <element id="module-output" name="lzma-ctx" />
+    </root>
+  </artifact>
+</component>
