@@ -1,86 +1,87 @@
+## 背景
 
-XZ for Java
-===========
+目前流行的 [XZ Utils](https://tukaani.org/xz/) 是基于流式设计，它能十分友好地处理文件流数据的压缩（即未知文件大小的情形，通过不断的 put/write 方法输入数据进行压缩）。但某些时候，由于各种原因，我们需要对数据进行分块（例如，不同的 chromosome、不同的基因区段矩阵、不同组织表达矩阵等），面对的数据经常是一个数据大小已知、频繁调用压缩的场景。字典类压缩算法使用时需要创建压缩字典表（LZMA 最大可达到 4 GB）及编码器，这会对内存造成巨大负担，也制约了普通用户使用这些工具的场景。因此，设计一种能够复用上下文结构的 LZMA 算法对节省内存开销具有重要意义。此处提供两种实现方式：基于 LZMA-SDK 转换接口实现（仅方便使用），复用上下文结构 LZMA。
 
-Introduction
+## 流式转换接口实现
 
-    This aims to be a complete implementation of XZ data compression
-    in pure Java. Features:
-      - Full support for the .xz file format specification version 1.0.4
-      - Single-threaded streamed compression and decompression
-      - Single-threaded decompression with limited random access support
-      - Raw streams (no .xz headers) for advanced users, including LZMA2
-        with preset dictionary
+首先，实现两个数据包装类：VolumeByteInputStream、VolumeByteOutputStream。它们的设计思想与 ByteArrayInputStream 和 ByteArrayOutputStream 类似，区别在于由于我们包装的数据长度是已知的，可以减少不必要的容量判断。此外，我们也提供 cache、seek 对外访问的方法，避免如同 ByteArrayOutputStream 在提取数据时需要使用 .toByteArray() 拷贝数据：
 
-    Threading is planned but it is unknown when it will be implemented.
+```java
+public synchronized byte toByteArray()[] {
+    return Arrays.copyOf(buf, count);
+}
+```
 
-    For the latest source code, see the project home page:
+测试：
 
-        https://tukaani.org/xz/java.html
+```java
+public static void main(String[] args) throws IOException {
+    // 创建测试数据
+    BufferedInputStream fileInputStream = new BufferedInputStream(new FileInputStream("./src/edu/sysu/pmglab/suranyi/lzma/LzmaDecompressStreamCtx.java"));
+    byte[] inputs = new byte[fileInputStream.available()];
+    byte[] outputs = new byte[fileInputStream.available()];
+    fileInputStream.read(inputs);
+    fileInputStream.close();
 
-    The source code is compatible with Java 5 and later (except
-    module-info.java which is Java 9 or later). However, the default
-    build options require OpenJDK 11 or later, and create Java 7
-    compatible binaries.
+    // 压缩
+    LzmaCompressStreamCtx compressStreamCtx = new LzmaCompressStreamCtx(3);
+    int inputsCompressedLength = compressStreamCtx.compress(inputs, 0, inputs.length, outputs, 0);
 
-Building with Apache Ant
+    // 解压
+    LzmaDecompressStreamCtx decompressStreamCtx = new LzmaDecompressStreamCtx();
+    int inputsUncompressedLength = decompressStreamCtx.decompress(outputs, 0, inputsCompressedLength, inputs, 0);
+    System.out.println(new String(Arrays.copyOfRange(inputs, 0, inputsUncompressedLength)));
+}
+```
 
-    Type "ant" to compile the classes and create the .jar files.
-    Type "ant doc" to build the javadoc HTML documentation. Note
-    that building the documentation will download a small file named
-    "element-list" or "package-list" from Oracle to enable linking to
-    the documentation of the standard Java classes.
+转换接口使得我们不必再书写大段重复的 new、close、write 代码，而可以直接调用 ctx.compress 和 ctx.decompress 进行压缩、解压工作。类似的转换也可以应用在 GZIP 等其他流式压缩实现上。
 
-    If you are using Ant older than 1.9.8:
+## 复用上下文结构 LZMA
 
-        Edit build.xml and remove the release attributes from <javac>
-        tags, that is, remove all occurrences of these two lines:
+复用上下文结构指每次压缩后（或压缩前）刷新数据标记，而不销毁数据容器，从而实现容器复用。在超大规模数据处理（如数千万人基因组阵列）中具有明显性能优势（内存与时间）。
 
-            release="${sourcever}"
+对于 LzmaCompressCtx，主要将 VolumeByteOutputStream 的构造器拆分在 LzmaCompressCtx 的构造器中，而编码器则在每一次使用后进行 reset。
 
-            release="${sourcever9}"
+对于 LzmaDecompressCtx，则主要判断是否发生了必要的“解码器重建”（即不同的压缩字典规模、不同的参数等），解码器器在每一次使用后进行 reset。此处注意到压缩字典大小是个频繁变化的参数（该值取决于原文件大小、压缩时的 compressionLevel 设置），因此，我们修改了 LZDecoder 的 reset 方法，仅当必要时发生缓冲区扩容。一旦遇到一个最大的字典大小，则之后任何的数据解压都建立在该字典数据区上，实现一次 new 多次使用。
 
-        The downside of the above is that then -source and -target
-        options will be used instead of --release.
+```java
+public void reset(int newBufferSize) {
+    start = 0;
+    pos = 0;
+    full = 0;
+    limit = 0;
+    pendingLen = 0;
+    pendingDist = 0;
+    if (newBufferSize > buf.length) {
+        buf = arrayCache.getByteArray(newBufferSize, false);
+    }
 
-    If you are using OpenJDK version older than 11:
+    bufSize = newBufferSize;
+    buf[bufSize - 1] = 0x00;
+}
+```
 
-        Adjust extdoc_url and extdoc_file to point to an older URL
-        and to use "package-list" instead of "element-list". This
-        modification isn't required if the documentation won't be
-        built.
+测试：
 
-    If you are using OpenJDK version older than 9:
+```java
+public static void main(String[] args) throws IOException {
+    // 创建测试数据
+    BufferedInputStream fileInputStream = new BufferedInputStream(new FileInputStream("./src/edu/sysu/pmglab/suranyi/lzma/LzmaDecompressStreamCtx.java"));
+    byte[] inputs = new byte[fileInputStream.available()];
+    byte[] outputs = new byte[fileInputStream.available()];
+    fileInputStream.read(inputs);
+    fileInputStream.close();
 
-        Comment the sourcever9 line in the file build.properties.
-        When it is commented, module-info.java won't be built and
-        xz.jar won't be a modular JAR.
+    // 压缩
+    LzmaCompressCtx compressCtx = new LzmaCompressCtx(3);
+    int inputsCompressedLength = compressCtx.compress(inputs, 0, inputs.length, outputs, 0);
 
-    If you are using OpenJDK version older than 7:
+    // 解压
+    LzmaDecompressCtx decompressCtx = new LzmaDecompressCtx();
+    int inputsUncompressedLength = decompressCtx.decompress(outputs, 0, inputsCompressedLength, inputs, 0);
+    System.out.println(new String(Arrays.copyOfRange(inputs, 0, inputsUncompressedLength)));
+}
+```
 
-        In build.properties, set "sourcever = 5" or "sourcever = 6"
-        to be compatible with Java 5 or 6.
-
-Building without Apache Ant
-
-    If you cannot or don't want to use Ant, just compile all .java files
-    under the "src" directory (possibly skip the demo files src/*.java).
-    For module support (Java >= 9) compile also src9/module-info.java.
-
-Demo programs
-
-    You can test compression with XZEncDemo, which compresses from
-    standard input to standard output:
-
-        java -jar build/jar/XZEncDemo.jar < foo.txt > foo.txt.xz
-
-    You can test decompression with XZDecDemo, which decompresses to
-    standard output:
-
-        java -jar build/jar/XZDecDemo.jar foo.txt.xz
-
-Reporting bugs
-
-    Report bugs to <lasse.collin@tukaani.org> or visit the IRC channel
-    #tukaani on Freenode and talk to Larhzu.
+### 
 
